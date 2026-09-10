@@ -48,9 +48,16 @@ You can launch the service using the published image.
 It carries no default policy, so you'll have to write your own and deploy it
 (probably inside fly.io).
 
+You need two files next to each other: `policy.yaml`, and a `fly.toml` that carries the app name,
+the `[env]` block, and the `[[files]]` entry that maps the policy into the machine. Examples in
+this repository should work with modifications (below).
+
 ```bash
+git clone https://github.com/gz/fly-oidc-discharge && cd fly-oidc-discharge
 cp policy.example.yaml policy.yaml   # then edit it
-fly launch --flycast --no-deploy     # private app, no public IP, but service can in theory be made public too
+$EDITOR fly.toml                     # app name, region, OIDC_DISCHARGE_LOCATION
+fly launch --flycast --no-deploy --copy-config   # private app, no public IP, keeps this fly.toml
+fly secrets set SHARED_SECRET_PROD="$(cat PROD.secret)"
 fly deploy --image ghcr.io/gz/fly-oidc-discharge:v1
 ```
 
@@ -62,14 +69,10 @@ location exactly.
 
 The default has no public IP, so the caller must be inside the Fly organization's private network.
 
-| Deployment | Location | Reachable by |
-|---|---|---|
-| Flycast, no public IP (default) | `http://<app>.flycast` | self-hosted runners in the org, or runners joined to a WireGuard or Tailscale path into the private network |
-| Public IP | `https://<app>.fly.dev` | any runner, including GitHub-hosted |
-
-Flycast serves plain HTTP, which is why `fly.toml` sets `force_https = false` and `OIDC_DISCHARGE_LOCATION` uses
-`http://`. The traffic stays on Fly's private WireGuard mesh, and it still passes through Fly Proxy,
-which is what makes autostart work.
+| Deployment | Reachable by |
+|---|---|
+| Flycast, no public IP (default) | self-hosted runners in the org, or runners joined to a WireGuard or Tailscale path into the private network |
+| Public IP | any runner, including GitHub-hosted |
 
 For GitHub-hosted runners with no VPN, give the app a public address instead:
 
@@ -78,9 +81,51 @@ fly ips allocate-v4 --shared
 fly ips allocate-v6
 ```
 
-Then set `force_https = true` and `OIDC_DISCHARGE_LOCATION = "https://<app>.fly.dev"`. A public deployment is
-exposed to anyone, so the OIDC check and the policy are all that stand in front of it. Both run
-before the ticket is examined.
+A public deployment is exposed to anyone, so the OIDC check and the policy are all that stand in
+front of it. Both run before the ticket is examined.
+
+### TLS
+
+Three shapes, and the location string has to match whichever you pick.
+
+| Deployment | Who holds the certificate | Location |
+|---|---|---|
+| Flycast, private (default) | nobody, plain HTTP inside Fly's private WireGuard mesh | `http://<app>.flycast` |
+| Public IP | Fly, with a certificate it issues and renews | `https://<app>.fly.dev` |
+| Certificate in the app | this service | `https://<a name you control>` |
+
+The default carries no certificate because Flycast serves plain HTTP, and the traffic never leaves
+Fly's private network. Going public is the easy upgrade: allocate an address, set
+`force_https = true`, and Fly terminates TLS for `<app>.fly.dev` or for a custom domain you add
+with `fly certs add`. Nothing in the service changes.
+
+The service terminates TLS itself only when both `TLS_CERT` and `TLS_PRIVATE_KEY` are set, holding
+PEM content. Reach for that when you want the private topology and an encrypted hop anyway, or when
+the certificate must not sit with the proxy. Fly then has to pass TCP through untouched, which is
+the commented service block in `fly.toml`.
+
+That path needs a DNS name you control, because a Flycast name cannot be certified. Let's Encrypt
+issues for it over DNS-01, which proves control through a DNS record rather than an inbound
+connection, so a private app can hold a publicly trusted certificate and the runner verifies it
+with no custom CA:
+
+```bash
+uv run --with certbot --with certbot-dns-route53 certbot certonly \
+  --non-interactive --agree-tos --email you@example.com \
+  --dns-route53 --preferred-challenges dns-01 \
+  -d discharge.example.com
+fly secrets set \
+  TLS_CERT="$(cat /etc/letsencrypt/live/discharge.example.com/fullchain.pem)" \
+  TLS_PRIVATE_KEY="$(cat /etc/letsencrypt/live/discharge.example.com/privkey.pem)"
+```
+
+Swap the `--dns-*` plugin for your provider. Renew on a schedule and set the secrets again, which
+restarts the machine with the new certificate. A weekly job that reads the live certificate with
+`openssl s_client`, renews within 30 days of expiry, and calls `fly secrets set` covers it.
+
+Both halves are required together. The service refuses to start with only one rather than falling
+back to plain HTTP, which would silently downgrade a caller that expects `https`, and it refuses an
+`http://` location while serving TLS.
 
 Outside Fly, mount the policy at `POLICY_FILE` (default `/etc/fly-oidc-discharge/policy.yaml`) or
 pass it inline in `POLICY_YAML`.
@@ -124,7 +169,7 @@ gh attestation verify oci://ghcr.io/gz/fly-oidc-discharge:v1 --repo gz/fly-oidc-
    Best practice: Store the printed `FlyV1 fm2_...` token as a GitHub **environment** secret of the matching
    environment, so only jobs targeting that environment can read it.
    Delete `*.tok`: the caveated token should be the only copy.
-   Delete `.secret`: The secret content is only needed where the service runs after tokens are minted.
+   Delete `*.secret`: The secret content is only needed where the service runs after tokens are minted.
    If you intent to re-mint new tokens with the same secret, store it in a safe place instead.
 
 3. Add the credential and its rules to `policy.yaml`, then `fly deploy`.
@@ -203,7 +248,9 @@ one environment.
 | `POLICY_YAML` | | policy as inline YAML; takes precedence over `POLICY_FILE` |
 | `OIDC_ISSUER` | `https://token.actions.githubusercontent.com` | OIDC issuer to trust |
 | `OIDC_AUDIENCE` | `OIDC_DISCHARGE_LOCATION` | `aud` the job must request |
-| `LISTEN_ADDR` | `:8080` | HTTP listen address |
+| `LISTEN_ADDR` | `:8080` | listen address |
+| `TLS_CERT` | | certificate chain in PEM, or `TLS_CERT_FILE` naming a file |
+| `TLS_PRIVATE_KEY` | | private key in PEM, or `TLS_PRIVATE_KEY_FILE` naming a file |
 
 Each credential names its own secret variable in the policy, through `shared_secret_env` or
 `shared_secret_file`. Discharge lifetime comes from `default_discharge_ttl` and the optional

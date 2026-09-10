@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -31,6 +33,9 @@ type config struct {
 	location   string
 	issuer     string
 	audience   string
+	// tlsCert and tlsKey hold PEM content. Both or neither.
+	tlsCert string
+	tlsKey  string
 	// policyFile is ignored when policyInline is set.
 	policyFile   string
 	policyInline string
@@ -90,8 +95,28 @@ func run(log *logrus.Logger) error {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	scheme := "http"
+	if cfg.hasTLS() {
+		certificate, err := tls.X509KeyPair([]byte(cfg.tlsCert), []byte(cfg.tlsKey))
+		if err != nil {
+			return fmt.Errorf("load TLS certificate: %w", err)
+		}
+		httpServer.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{certificate},
+			MinVersion:   tls.VersionTLS12,
+		}
+		scheme = "https"
+	}
+
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- httpServer.ListenAndServe() }()
+	go func() {
+		if cfg.hasTLS() {
+			// The key pair is already parsed into TLSConfig.
+			serveErr <- httpServer.ListenAndServeTLS("", "")
+			return
+		}
+		serveErr <- httpServer.ListenAndServe()
+	}()
 	for _, credential := range pol.Credentials {
 		log.WithFields(logrus.Fields{
 			"credential": credential.Name,
@@ -101,6 +126,7 @@ func run(log *logrus.Logger) error {
 	}
 	log.WithFields(logrus.Fields{
 		"addr":        cfg.listenAddr,
+		"scheme":      scheme,
 		"policy":      source,
 		"location":    cfg.location,
 		"issuer":      cfg.issuer,
@@ -139,7 +165,37 @@ func configFromEnv() (*config, error) {
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment: %s", strings.Join(missing, ", "))
 	}
+
+	var err error
+	if cfg.tlsCert, err = pemFromEnv("TLS_CERT"); err != nil {
+		return nil, err
+	}
+	if cfg.tlsKey, err = pemFromEnv("TLS_PRIVATE_KEY"); err != nil {
+		return nil, err
+	}
+	// Half a key pair is a deployment mistake, and falling back to plain HTTP
+	// would silently downgrade a caller expecting https.
+	if (cfg.tlsCert == "") != (cfg.tlsKey == "") {
+		return nil, errors.New("set both TLS_CERT and TLS_PRIVATE_KEY, or neither")
+	}
+	if cfg.hasTLS() && strings.HasPrefix(cfg.location, "http://") {
+		return nil, fmt.Errorf("serving TLS but OIDC_DISCHARGE_LOCATION is %s: the caveat location must be the URL callers use", cfg.location)
+	}
 	return cfg, nil
+}
+
+func (c *config) hasTLS() bool { return c.tlsCert != "" && c.tlsKey != "" }
+
+// pemFromEnv reads PEM content from NAME, or from the file named by NAME_FILE.
+func pemFromEnv(name string) (string, error) {
+	if path := os.Getenv(name + "_FILE"); path != "" {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read %s_FILE: %w", name, err)
+		}
+		return string(pem), nil
+	}
+	return os.Getenv(name), nil
 }
 
 // loadPolicy reads the policy from POLICY_YAML when set, so the published
