@@ -144,7 +144,7 @@ Going public is simpler: leave `TLS_CERT` unset, use the `[http_service]` block 
        steps:
          - uses: superfly/flyctl-actions/setup-flyctl@master
          - id: fly
-           uses: gz/fly-oidc-discharge@v1
+           uses: gz/fly-oidc-discharge@v1.0.0
            with:
              caveated-token: ${{ secrets.FLY_CAVEATED_TOKEN }}
              location: https://discharge.example.com
