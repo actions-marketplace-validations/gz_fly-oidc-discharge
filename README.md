@@ -45,8 +45,8 @@ sequenceDiagram
 ## Run it
 
 You can launch the service using the published image.
-It carries no default policy, so you'll have to write your own and deploy it
-(probably inside fly.io).
+It carries no default policy, so you'll have to [write your own](#admission-policy)
+and deploy that.
 
 You need two files next to each other: `policy.yaml`, and a `fly.toml` that carries the app name,
 the `[env]` block, and the `[[files]]` entry that maps the policy into the machine. Examples in
@@ -100,51 +100,10 @@ carries the certificate in the service or runs unencrypted, and the default carr
 In the default, `fly.toml` forwards TCP on 443 with no `tls` handler and the service presents the
 certificate from `TLS_CERT` and `TLS_PRIVATE_KEY`, which hold PEM content. Requests still go
 through Fly Proxy, which is what starts a stopped machine.
-
-That needs a DNS name you control, because a Flycast name cannot be certified. Let's Encrypt issues
-for it over DNS-01, which proves control through a DNS record rather than an inbound connection, so
-a private app can hold a publicly trusted certificate and the runner verifies it with no custom CA:
-
-```bash
-uv run --with certbot --with certbot-dns-route53 certbot certonly \
-  --non-interactive --agree-tos --email you@example.com \
-  --dns-route53 --preferred-challenges dns-01 \
-  -d discharge.example.com
-fly secrets set \
-  TLS_CERT="$(cat /etc/letsencrypt/live/discharge.example.com/fullchain.pem)" \
-  TLS_PRIVATE_KEY="$(cat /etc/letsencrypt/live/discharge.example.com/privkey.pem)"
-```
-
-Swap the `--dns-*` plugin for your provider. Renew on a schedule and set the secrets again, which
-restarts the machine with the new certificate. A weekly job that reads the live certificate with
-`openssl s_client`, renews within 30 days of expiry, and calls `fly secrets set` covers it.
+Needs a DNS name you control, because a Flycast name cannot be certified.
 
 Going public is simpler: leave `TLS_CERT` unset, use the `[http_service]` block commented in
-`fly.toml`, and Fly terminates for `<app>.fly.dev` or for a domain you add with `fly certs add`.
-
-Both halves of the pair are required together. The service refuses to start with only one rather
-than falling back to plain HTTP, which would silently downgrade a caller that expects `https`, and
-it refuses an `http://` location while serving TLS. Omit both to serve plain HTTP, which is how the
-container runs locally and how the tests run.
-
-Outside Fly, mount the policy at `POLICY_FILE` (default `/etc/fly-oidc-discharge/policy.yaml`) or
-pass it inline in `POLICY_YAML`.
-
-```bash
-docker run -p 8080:8080 \
-  -e OIDC_DISCHARGE_LOCATION=https://discharge.example.com \
-  -e SHARED_SECRET_PROD="$(cat prod.secret)" \
-  -v "$PWD/policy.yaml:/etc/fly-oidc-discharge/policy.yaml:ro" \
-  ghcr.io/gz/fly-oidc-discharge:v1
-```
-
-Images are built for `linux/amd64` and `linux/arm64` and tagged `vX`, `vX.Y`, `vX.Y.Z`, `main`, and
-`sha-<commit>`. A public repository also gets a signed provenance attestation, which GitHub does not
-offer for user-owned private ones:
-
-```bash
-gh attestation verify oci://ghcr.io/gz/fly-oidc-discharge:v1 --repo gz/fly-oidc-discharge
-```
+`fly.toml`, and fly.io terminates TLS for `<app>.fly.dev` or for a domain you add with `fly certs add`.
 
 ## Wire up a repository
 
@@ -195,8 +154,7 @@ gh attestation verify oci://ghcr.io/gz/fly-oidc-discharge:v1 --repo gz/fly-oidc-
    ```
 
    The refs above are mutable for readability. Pin every action to a full commit
-   SHA in a job that holds deployment authority, because a moved ref runs new code
-   next to your Fly token.
+   SHA in a job that holds deployment authority.
 
 ## Admission Policy
 
@@ -234,10 +192,9 @@ characters, including `/`. Every rule must pin `repository`, `repository_owner`,
 [GitHub OIDC token](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect#understanding-the-oidc-token);
 booleans such as `ref_protected` match as `"true"` or `"false"`.
 
-Rules constrain their own credential and nothing else. A permissive rule stays permissive for that
-credential: a rule of `repository` plus `ref` admits any job on that ref, including one that
-declares `environment: prod`. Add the `environment` claim to every credential you want restricted to
-one environment.
+Each credential names its own secret variable in the policy, through `shared_secret_env` or
+`shared_secret_file`. Discharge lifetime comes from `default_discharge_ttl` and the optional
+per-credential `discharge_ttl`.
 
 ## Configuration
 
@@ -251,15 +208,3 @@ one environment.
 | `LISTEN_ADDR` | `:8080` | listen address |
 | `TLS_CERT` | | certificate chain in PEM, or `TLS_CERT_FILE` naming a file |
 | `TLS_PRIVATE_KEY` | | private key in PEM, or `TLS_PRIVATE_KEY_FILE` naming a file |
-
-Each credential names its own secret variable in the policy, through `shared_secret_env` or
-`shared_secret_file`. Discharge lifetime comes from `default_discharge_ttl` and the optional
-per-credential `discharge_ttl`.
-
-Another OIDC issuer works as long as its tokens carry claims a rule can pin. Point `OIDC_ISSUER` at
-it, and remember that `repository` and `job_workflow_ref` are GitHub-specific claim names.
-
-The issuer's discovery document is resolved on the first token rather than at startup, so a machine
-woken by Fly Proxy serves without a network round trip on its startup path and cannot crash-loop
-because the issuer was briefly unreachable. Startup attempts to warm it and logs a warning if it
-fails, so a wrong `OIDC_ISSUER` shows up as that warning followed by 401s.
