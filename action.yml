@@ -26,6 +26,9 @@ outputs:
       the caveated token's shared secret. Useful for spotting a job wired to the
       wrong secret.
     value: ${{ steps.discharge.outputs.credential }}
+branding:
+  icon: key
+  color: purple
 runs:
   using: composite
   steps:
