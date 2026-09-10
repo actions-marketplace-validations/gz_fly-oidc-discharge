@@ -54,8 +54,8 @@ fly launch --flycast --no-deploy     # private app, no public IP, but service ca
 fly deploy --image ghcr.io/gz/fly-oidc-discharge:v1
 ```
 
-`fly.toml` ships the policy in the `[[files]]` section. 
-Set `OIDC_DISCHARGE_LOCATION` to the URL the runner will use, which must match the caveat 
+`fly.toml` ships the policy in the `[[files]]` section.
+Set `OIDC_DISCHARGE_LOCATION` to the URL the runner will use, which must match the caveat
 location exactly.
 
 ### Reaching it
