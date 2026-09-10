@@ -28,7 +28,9 @@ outputs:
       wrong secret.
     value: ${{ steps.discharge.outputs.credential }}
 branding:
-  icon: key
+  # A Feather icon, minus the thirteen GitHub omits. "key" is one of those and
+  # renders as nothing.
+  icon: alert-octagon
   color: purple
 runs:
   using: composite
