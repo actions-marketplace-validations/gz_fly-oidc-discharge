@@ -28,7 +28,7 @@ sequenceDiagram
     Job->>Job: fly tokens 3p ticket (caveated token)
     Job->>Svc: POST /.well-known/macfly/3p {ticket}, Authorization: Bearer OIDC JWT
     Svc->>Svc: verify JWT signature, issuer, audience, expiry
-    Svc->>Svc: try each shared secret; the one that opens the ticket names the credential
+    Svc->>Svc: the shared secret that opens the ticket selects the credential
     Svc->>Svc: match claims against that credential's rules only
     Svc->>Svc: sign discharge, add ValidityWindow
     Svc-->>Job: {discharge}, X-Discharge-Credential
@@ -54,8 +54,8 @@ fly launch --flycast --no-deploy     # private app, no public IP, but service ca
 fly deploy --image ghcr.io/gz/fly-oidc-discharge:v1
 ```
 
-`fly.toml` ships the policy in the `[[files]]` section, so a policy change is a `fly deploy` and
-never a rebuild. Set `OIDC_DISCHARGE_LOCATION` to the URL the runner will use, which must match the caveat
+`fly.toml` ships the policy in the `[[files]]` section. 
+Set `OIDC_DISCHARGE_LOCATION` to the URL the runner will use, which must match the caveat 
 location exactly.
 
 ### Reaching it
@@ -93,8 +93,9 @@ docker run -p 8080:8080 \
   ghcr.io/gz/fly-oidc-discharge:v1
 ```
 
-Images are built for `linux/amd64` and `linux/arm64`, tagged `vX`, `vX.Y`, `vX.Y.Z`, `main`, and
-`sha-<commit>`, and carry a signed provenance attestation:
+Images are built for `linux/amd64` and `linux/arm64` and tagged `vX`, `vX.Y`, `vX.Y.Z`, `main`, and
+`sha-<commit>`. A public repository also gets a signed provenance attestation, which GitHub does not
+offer for user-owned private ones:
 
 ```bash
 gh attestation verify oci://ghcr.io/gz/fly-oidc-discharge:v1 --repo gz/fly-oidc-discharge
