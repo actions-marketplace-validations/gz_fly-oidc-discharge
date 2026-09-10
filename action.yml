@@ -1,0 +1,102 @@
+name: Fly token via GitHub OIDC
+description: >-
+  Exchange the job's GitHub OIDC token for a short-lived Fly.io API token by
+  discharging the third-party caveat on a stored, otherwise inert Fly token.
+inputs:
+  caveated-token:
+    description: >-
+      Fly token carrying the third-party caveat, as printed by `fly tokens 3p add`.
+      Its shared secret selects which credential the discharge service applies,
+      so store the per-environment token as that environment's secret.
+    required: true
+  location:
+    description: URL of the discharge service. Must be byte-identical to the `--location` given to `fly tokens 3p add`.
+    required: true
+  audience:
+    description: Audience requested for the GitHub OIDC token. Defaults to `location`.
+    required: false
+    default: ""
+outputs:
+  token:
+    description: Discharged Fly token. Pass it as FLY_API_TOKEN, step-scoped where possible.
+    value: ${{ steps.discharge.outputs.token }}
+  credential:
+    description: >-
+      Name of the credential the service discharged, which the policy chose from
+      the caveated token's shared secret. Useful for spotting a job wired to the
+      wrong secret.
+    value: ${{ steps.discharge.outputs.credential }}
+runs:
+  using: composite
+  steps:
+    - id: discharge
+      shell: bash
+      env:
+        CAVEATED_TOKEN: ${{ inputs.caveated-token }}
+        LOCATION: ${{ inputs.location }}
+        AUDIENCE: ${{ inputs.audience || inputs.location }}
+        FLY_NO_UPDATE_CHECK: "1"
+      run: |
+        set -euo pipefail
+        # A macaroon token header is base64 tokens joined by commas. Anything
+        # outside that alphabet, a newline above all, would let a hostile
+        # endpoint forge runner commands and extra step outputs below.
+        require_token_shape() {
+          case "$2" in
+            "") echo "::error::$1 is empty"; return 1 ;;
+            *[!A-Za-z0-9+/=_,.-]*) echo "::error::$1 contains characters a Fly token never has"; return 1 ;;
+          esac
+        }
+        for tool in flyctl curl jq; do
+          command -v "$tool" >/dev/null || { echo "::error::$tool not on PATH (run superfly/flyctl-actions/setup-flyctl first)"; exit 1; }
+        done
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::error::no OIDC token available: grant the job 'permissions: id-token: write'"
+          exit 1
+        fi
+
+        audience_param=$(jq -rn --arg a "$AUDIENCE" '$a|@uri')
+        oidc_token=$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience_param}" | jq -er '.value')
+
+        ticket=$(flyctl tokens 3p ticket --location "$LOCATION" --access-token "$CAVEATED_TOKEN")
+
+        response=$(mktemp); headers=$(mktemp)
+        # The service may be scaled to zero, so a cold start can surface as a
+        # connection failure or a gateway error before it serves.
+        status=""
+        for attempt in 1 2 3 4 5; do
+          status=$(curl -sS -o "$response" -D "$headers" -w '%{http_code}' \
+            --connect-timeout 10 --max-time 60 -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -cn --arg t "$ticket" '{ticket: $t}')" \
+            "${LOCATION%/}/.well-known/macfly/3p") || status="000"
+          case "$status" in
+            000|429|502|503|504)
+              [ "$attempt" -eq 5 ] && break
+              echo "discharge service not ready (HTTP ${status}), retrying in ${attempt}s"
+              sleep "$attempt"
+              ;;
+            *) break ;;
+          esac
+        done
+        if [ "$status" != "201" ]; then
+          echo "::error::discharge service returned HTTP ${status}: $(jq -r '.error // .' "$response" 2>/dev/null || cat "$response")"
+          exit 1
+        fi
+        discharge=$(jq -er '.discharge' "$response")
+        require_token_shape "the discharge" "$discharge"
+        # Diagnostic only, and reduced to a safe alphabet rather than rejected.
+        credential=$(tr -d '\r' < "$headers" | sed -n 's/^[Xx]-[Dd]ischarge-[Cc]redential: *//p' | tail -1 | tr -cd 'A-Za-z0-9._-')
+        rm -f "$response" "$headers"
+        echo "discharged credential: ${credential:-unknown}"
+        echo "credential=${credential}" >> "$GITHUB_OUTPUT"
+        echo "::add-mask::${discharge}"
+
+        # A Fly token header is the permission token and its discharges, comma separated.
+        body="${CAVEATED_TOKEN#FlyV1 },${discharge}"
+        require_token_shape "the composed token" "$body"
+        token="FlyV1 ${body}"
+        echo "::add-mask::${token}"
+        echo "token=${token}" >> "$GITHUB_OUTPUT"

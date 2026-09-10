@@ -1,0 +1,4 @@
+/fly-oidc-discharge
+/out/
+*.secret
+*.b64

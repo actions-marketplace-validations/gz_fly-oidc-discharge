@@ -1,0 +1,40 @@
+# Private by default: no public IP, reachable only inside the Fly organization's
+# network as http://<app>.flycast. Create it with `fly launch --flycast`, or for
+# an existing app `fly ips allocate-v6 --private` and release the public ones.
+# A caller outside that network needs a public IP; see the README.
+app = "fly-oidc-discharge"
+primary_region = "sjc"
+
+[build]
+  # image = "ghcr.io/gz/fly-oidc-discharge:v1"
+
+[env]
+  # Must match `fly tokens 3p add --location` and the action's `location` input.
+  OIDC_DISCHARGE_LOCATION = "http://fly-oidc-discharge.flycast"
+  POLICY_FILE = "/etc/fly-oidc-discharge/policy.yaml"
+
+# The policy travels with `fly deploy`, so no volume and no rebuild is needed.
+[[files]]
+  guest_path = "/etc/fly-oidc-discharge/policy.yaml"
+  local_path = "policy.yaml"
+
+# Every credential's shared secret is a Fly secret named by the policy:
+#   fly secrets set SHARED_SECRET_PROD=... SHARED_SECRET_STAGING=... SHARED_SECRET_CI=...
+
+[http_service]
+  internal_port = 8080
+  # Flycast serves plain HTTP; forcing HTTPS would break it.
+  force_https = false
+  # Idle costs nothing: Fly Proxy stops the machine when no request is in
+  # flight and starts it again on the next one.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 250
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
