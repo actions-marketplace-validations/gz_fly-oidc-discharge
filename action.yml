@@ -1,7 +1,8 @@
 name: Fly token via GitHub OIDC
+# Marketplace rejects a description of 125 characters or more.
 description: >-
-  Exchange the job's GitHub OIDC token for a short-lived Fly.io API token by
-  discharging the third-party caveat on a stored, otherwise inert Fly token.
+  Exchange the job's GitHub OIDC token for a short-lived Fly.io API token,
+  leaving no usable Fly token in GitHub.
 inputs:
   caveated-token:
     description: >-
