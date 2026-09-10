@@ -16,8 +16,8 @@ The solution:
 fly.io implements 'macaroons', a form of signed capabilities. This service bridges OIDC and Macaroons:
 In fly.io terminology, it means each Fly token gets a [third-party caveat](https://fly.io/blog/macaroons-escalated-quickly/)
 pointing at this service, which leaves the token inert until the service adds a discharge.
-This services only adds a discharge after it validates the GitHub OIDC token
-and makes sure matches the policy defined in this service.
+This service only adds a discharge after it validates the GitHub OIDC token
+and makes sure the JWT matches the policy shipped with the service.
 `fly deploy`, `fly secrets set`, and the rest work unchanged after the service added the discharge.
 
 ```mermaid
