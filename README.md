@@ -1,7 +1,7 @@
 # fly-oidc-discharge
 
 A service that mints short-lived Fly.io API tokens inside GitHub Actions
-based on OIDC Connect. No (usable) Fly token need to be stored in GitHub secrets.
+based on OIDC Connect. No (finished) Fly token need to be stored in GitHub secrets.
 
 The problem:
 
@@ -57,6 +57,7 @@ git clone https://github.com/gz/fly-oidc-discharge && cd fly-oidc-discharge
 cp policy.example.yaml policy.yaml   # then edit it
 $EDITOR fly.toml                     # app name, region, OIDC_DISCHARGE_LOCATION
 fly launch --flycast --no-deploy --copy-config   # private app, no public IP, keeps this fly.toml
+fly secrets set TLS_CERT="$(cat fullchain.pem)" TLS_PRIVATE_KEY="$(cat privkey.pem)"
 fly secrets set SHARED_SECRET_PROD="$(cat PROD.secret)"
 fly deploy --image ghcr.io/gz/fly-oidc-discharge:v1
 ```
@@ -86,28 +87,23 @@ front of it. Both run before the ticket is examined.
 
 ### TLS
 
-Three shapes, and the location string has to match whichever you pick.
+Fly Proxy cannot terminate TLS on a private address, because
+[Flycast is HTTP-only](https://fly.io/docs/networking/flycast/). So the private deployment either
+carries the certificate in the service or runs unencrypted, and the default carries it.
 
-| Deployment | Who holds the certificate | Location |
+| Deployment | Who terminates TLS | Location |
 |---|---|---|
-| Flycast, private (default) | nobody, plain HTTP inside Fly's private WireGuard mesh | `http://<app>.flycast` |
+| Flycast, private (default) | this service, from `TLS_CERT` | `https://<a name you control>` |
 | Public IP | Fly, with a certificate it issues and renews | `https://<app>.fly.dev` |
-| Certificate in the app | this service | `https://<a name you control>` |
+| Flycast with no certificate | nobody, plain HTTP inside Fly's private network | `http://<app>.flycast` |
 
-The default carries no certificate because Flycast serves plain HTTP, and the traffic never leaves
-Fly's private network. Going public is the easy upgrade: allocate an address, set
-`force_https = true`, and Fly terminates TLS for `<app>.fly.dev` or for a custom domain you add
-with `fly certs add`. Nothing in the service changes.
+In the default, `fly.toml` forwards TCP on 443 with no `tls` handler and the service presents the
+certificate from `TLS_CERT` and `TLS_PRIVATE_KEY`, which hold PEM content. Requests still go
+through Fly Proxy, which is what starts a stopped machine.
 
-The service terminates TLS itself only when both `TLS_CERT` and `TLS_PRIVATE_KEY` are set, holding
-PEM content. Reach for that when you want the private topology and an encrypted hop anyway, or when
-the certificate must not sit with the proxy. Fly then has to pass TCP through untouched, which is
-the commented service block in `fly.toml`.
-
-That path needs a DNS name you control, because a Flycast name cannot be certified. Let's Encrypt
-issues for it over DNS-01, which proves control through a DNS record rather than an inbound
-connection, so a private app can hold a publicly trusted certificate and the runner verifies it
-with no custom CA:
+That needs a DNS name you control, because a Flycast name cannot be certified. Let's Encrypt issues
+for it over DNS-01, which proves control through a DNS record rather than an inbound connection, so
+a private app can hold a publicly trusted certificate and the runner verifies it with no custom CA:
 
 ```bash
 uv run --with certbot --with certbot-dns-route53 certbot certonly \
@@ -123,9 +119,13 @@ Swap the `--dns-*` plugin for your provider. Renew on a schedule and set the sec
 restarts the machine with the new certificate. A weekly job that reads the live certificate with
 `openssl s_client`, renews within 30 days of expiry, and calls `fly secrets set` covers it.
 
-Both halves are required together. The service refuses to start with only one rather than falling
-back to plain HTTP, which would silently downgrade a caller that expects `https`, and it refuses an
-`http://` location while serving TLS.
+Going public is simpler: leave `TLS_CERT` unset, use the `[http_service]` block commented in
+`fly.toml`, and Fly terminates for `<app>.fly.dev` or for a domain you add with `fly certs add`.
+
+Both halves of the pair are required together. The service refuses to start with only one rather
+than falling back to plain HTTP, which would silently downgrade a caller that expects `https`, and
+it refuses an `http://` location while serving TLS. Omit both to serve plain HTTP, which is how the
+container runs locally and how the tests run.
 
 Outside Fly, mount the policy at `POLICY_FILE` (default `/etc/fly-oidc-discharge/policy.yaml`) or
 pass it inline in `POLICY_YAML`.
@@ -162,7 +162,7 @@ gh attestation verify oci://ghcr.io/gz/fly-oidc-discharge:v1 --repo gz/fly-oidc-
 
    ```bash
    fly tokens create deploy --app my-app-prod --expiry 9999h > prod.tok
-   fly tokens 3p add --location http://my-discharge.flycast \
+   fly tokens 3p add --location https://discharge.example.com \
        --secret-file PROD.secret --access-token "$(cat prod.tok)"
    ```
 
@@ -188,7 +188,7 @@ gh attestation verify oci://ghcr.io/gz/fly-oidc-discharge:v1 --repo gz/fly-oidc-
            uses: gz/fly-oidc-discharge@v1
            with:
              caveated-token: ${{ secrets.FLY_CAVEATED_TOKEN }}
-             location: http://my-discharge.flycast
+             location: https://discharge.example.com
          - run: flyctl deploy
            env:
              FLY_API_TOKEN: ${{ steps.fly.outputs.token }}

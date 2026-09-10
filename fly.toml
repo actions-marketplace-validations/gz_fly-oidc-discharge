@@ -1,7 +1,6 @@
 # Private by default: no public IP, reachable only inside the Fly organization's
-# network as http://<app>.flycast. Create it with `fly launch --flycast`, or for
-# an existing app `fly ips allocate-v6 --private` and release the public ones.
-# See the README for the two ways to get TLS.
+# network. Create it with `fly launch --flycast`, or for an existing app
+# `fly ips allocate-v6 --private` and release the public ones.
 app = "fly-oidc-discharge"
 primary_region = "sjc"
 
@@ -9,8 +8,9 @@ primary_region = "sjc"
   # image = "ghcr.io/gz/fly-oidc-discharge:v1"
 
 [env]
-  # Must match `fly tokens 3p add --location` and the action's `location` input.
-  OIDC_DISCHARGE_LOCATION = "http://fly-oidc-discharge.flycast"
+  # Must match `fly tokens 3p add --location` and the action's `location` input,
+  # and must be a name the certificate covers.
+  OIDC_DISCHARGE_LOCATION = "https://discharge.example.com"
   POLICY_FILE = "/etc/fly-oidc-discharge/policy.yaml"
 
 # The policy travels with `fly deploy`, so no volume and no rebuild is needed.
@@ -18,56 +18,55 @@ primary_region = "sjc"
   guest_path = "/etc/fly-oidc-discharge/policy.yaml"
   local_path = "policy.yaml"
 
-# Every credential's shared secret is a Fly secret named by the policy:
+# Secrets this app expects:
+#   fly secrets set TLS_CERT="$(cat fullchain.pem)" TLS_PRIVATE_KEY="$(cat privkey.pem)"
 #   fly secrets set SHARED_SECRET_PROD=... SHARED_SECRET_STAGING=...
 
-[http_service]
+# Flycast is HTTP-only, so Fly Proxy cannot terminate TLS on a private address.
+# The service holds the certificate instead and Fly forwards TCP untouched.
+# Requests still pass through Fly Proxy, which is what starts a stopped machine.
+[[services]]
   internal_port = 8080
-  # Flycast serves plain HTTP. With a public IP, set this true and Fly
-  # terminates TLS with a certificate it issues and renews.
-  force_https = false
-  # Idle costs nothing: Fly Proxy stops the machine when no request is in
-  # flight and starts it again on the next one.
+  protocol = "tcp"
+  # Idle costs nothing: the machine stops when no request is in flight and
+  # starts again on the next one.
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0
 
-  [[http_service.checks]]
+  [[services.ports]]
+    port = 443
+    handlers = [] # no "tls" handler: this service holds the certificate
+
+  [[services.http_checks]]
     interval = "15s"
     timeout = "2s"
     grace_period = "5s"
-    method = "GET"
+    method = "get"
     path = "/healthz"
+    protocol = "https"
+    tls_skip_verify = false
+    tls_server_name = "discharge.example.com"
 
-  [http_service.concurrency]
-    type = "requests"
-    soft_limit = 250
-
-# To terminate TLS in the service instead, so the certificate never leaves this
-# app, set TLS_CERT and TLS_PRIVATE_KEY as secrets and replace [http_service]
-# with a passthrough service. Fly Proxy then forwards TCP untouched, and
-# autostart still works because the connection goes through the proxy:
+# For a public deployment, let Fly terminate TLS instead and leave TLS_CERT
+# unset. Replace the service block above with:
 #
-#   [[services]]
+#   [http_service]
 #     internal_port = 8080
-#     protocol = "tcp"
+#     force_https = true
 #     auto_stop_machines = "stop"
 #     auto_start_machines = true
 #     min_machines_running = 0
 #
-#     [[services.ports]]
-#       port = 443
-#       handlers = []   # no "tls" handler: this service holds the certificate
-#
-#     [[services.http_checks]]
+#     [[http_service.checks]]
 #       interval = "15s"
 #       timeout = "2s"
 #       grace_period = "5s"
-#       method = "get"
+#       method = "GET"
 #       path = "/healthz"
-#       protocol = "https"
-#       tls_skip_verify = false
-#       tls_server_name = "discharge.example.com"
+#
+# then `fly ips allocate-v4 --shared`, `fly ips allocate-v6`, and set
+# OIDC_DISCHARGE_LOCATION to https://<app>.fly.dev or a domain from `fly certs add`.
 
 [[vm]]
   size = "shared-cpu-1x"
